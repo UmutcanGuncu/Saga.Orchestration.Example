@@ -1,9 +1,13 @@
 using MassTransit;
 using Microsoft.EntityFrameworkCore;
+using Order.API.Consumers;
 using Order.API.Contexts;
 using Order.API.Models;
 using Order.API.Models.Enums;
 using Order.API.ViewModels;
+using Shared.Messages;
+using Shared.OrderEvents;
+using Shared.Settings;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -16,9 +20,13 @@ builder.Services.AddDbContext<OrderAPIDBContext>(cfg =>
 });
 builder.Services.AddMassTransit(configure =>
 {
+    configure.AddConsumer<OrderCompletedEventConsumer>();
+    configure.AddConsumer<OrderFailedEventConsumer>();
     configure.UsingRabbitMq((context, _configure) =>
     {
         _configure.Host(builder.Configuration["RabbitMQ"]);
+        _configure.ReceiveEndpoint(RabbitMQSetting.Order_OrderCompletedEventQueue, e=>e.ConfigureConsumer<OrderCompletedEventConsumer>(context));
+        _configure.ReceiveEndpoint(RabbitMQSetting.Order_OrderFailedEventQueue, e=>e.ConfigureConsumer<OrderFailedEventConsumer>(context));
     });
 });
 AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
@@ -30,7 +38,7 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-app.MapPost("/create-order", async (CreateOrderViewModel model, OrderAPIDBContext context) =>
+app.MapPost("/create-order", async (CreateOrderViewModel model, OrderAPIDBContext context, ISendEndpointProvider sendEndpointProvider) =>
 {
     Order.API.Models.Order order = new()
     {
@@ -47,6 +55,20 @@ app.MapPost("/create-order", async (CreateOrderViewModel model, OrderAPIDBContex
     };
     await context.Orders.AddAsync(order);
     await context.SaveChangesAsync();
+    OrderStartedEvent orderStartedEvent = new()
+    {
+        BuyerId = model.BuyerId,
+        OrderId = order.Id,
+        TotalPrice = model.OrderItems.Sum(x => x.Price * x.Count),
+        OrderItems = model.OrderItems.Select(x => new OrderItemMessage
+        {
+            Price = x.Price,
+            ProductId = x.ProductId,
+            Count = x.Count,
+        }).ToList()
+    };
+    var sendEndpoint = await sendEndpointProvider.GetSendEndpoint(new Uri($"queue:{RabbitMQSetting.StateMachineQueue}"));
+    await sendEndpoint.Send<OrderStartedEvent>(orderStartedEvent);
 });
 app.UseHttpsRedirection();
 

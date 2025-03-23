@@ -1,6 +1,6 @@
 namespace Order.API.Models.Enums;
 
-public class OrderStatus
+public enum OrderStatus
 {
-    
+    Suspend,Completed, Failed
 }
